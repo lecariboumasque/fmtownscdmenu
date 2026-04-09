@@ -1,0 +1,286 @@
+						ASSUME	CS:CODE,DS:CODE
+
+						PAGE	99,160
+
+VERSION_STRING			EQU		"VERSION 20260404a"
+
+						.386p
+CODE					SEGMENT	USE16
+
+						INCLUDE		IODEF.ASM
+						INCLUDE		DEF.ASM
+
+; If making a .COM executable, the offset needs to be 0100h
+IFDEF	COMEXE
+						ORG			0100H
+ENDIF
+
+
+MAIN					PROC
+						; ****ing MASM kindly inserts NOP after JMP and messes up the offsets.  Good job, Microsoft.
+						DB		0EBH,(REALMAIN-@f)  ; JMP		REALMAIN
+@@:
+						DB		"RESCUE"
+												; Offsets must be consisntent with DEF.H
+CONTROL_FLAGS			DW		0				; +8
+YSSCSICD_LBA			DD		0				; +10  For CD and HD IPL
+YSSCSICD_SECTOR_COUNT	DB		24				; +14  For CD and HD IPL
+						DB		0				; +15  Not used at this time.
+SELF_LBA				DD		0				; +16  Loader LBA (Set only when booting from HD)
+
+INCOMING_BX				DW		0
+LOADER_BIOS_DEVICE_ID	DB		0
+
+REALMAIN:
+; Incoming BL:Device Type   1:HD/CD  2:FD  4:ICM  8:CD
+; Incoming BH:Unit Number
+						CLI
+						PUSH	CS
+						POP		DS
+
+
+
+IFNDEF	COMEXE
+						MOV		BP,CS
+						SUB		BP,1000H
+						MOV		SS,BP
+						MOV		SP,0FFFEH ; IO.SYS will reset the stack pointer anyway.
+ELSE
+						MOV		BP,CS
+						MOV		SS,BP
+						MOV		SP,0100H
+
+						SMSW	AX
+						AND		AX,1
+						JE		NOT_VM86
+
+						MOV		DX,OFFSET MESSAGE_VM86
+						MOV		AH,9	; Print String
+						INT		21H
+						MOV		AX,4CFFH	; Exit with -1.
+						INT		21H
+
+NOT_VM86:
+						MOV		DX,0FDA0h	; CRTC Page
+						MOV		AL,0Ch		; Only show page 0.
+						OUT		DX,AL
+
+						MOV		WORD PTR CS:[CONTROL_FLAGS],CONTROL_FLAG_DONT_REMEMBER_BOOT_CHOICE+CONTROL_FLAG_DONT_SCAN_PARTITION+CONTROL_FLAG_BOOT_MENU
+						MOV		BYTE PTR CS:[AUTOBOOT],0
+
+						MOV		BX,8		; Pretend to be from a CD.
+ENDIF
+
+
+
+						MOV		CS:[INCOMING_BX],BX
+						AND		BX,0F0FH
+						CMP		BL,1		; HD/CD?
+						JNE		SHORT @f
+						OR		BH,0B0H
+						JMP		SHORT DEVICE_ID_SET
+@@:
+						CMP		BL,2		; FD?
+						JNE		SHORT @f
+						OR		BH,020H
+						JMP		SHORT DEVICE_ID_SET
+
+@@:
+						CMP		BL,4		; ICM?
+						JNE		SHORT @f
+						MOV		BH,4AH
+						JMP		SHORT DEVICE_ID_SET
+
+@@:
+						XOR		BX,BX
+
+DEVICE_ID_SET:
+						MOV		CS:[LOADER_BIOS_DEVICE_ID],BH
+
+
+						CALL	INITGRAPHICS
+						CALL	VRAMMODE
+						CALL	CLS
+						CALL	RESETPALETTE16
+
+						CALL	CRTC640X480_640X480MOD
+
+						CALL	LISTSCSI
+						CALL	FIND_LAST_SCSI_CD
+						MOV		CS:[SCSI_ID_CDROM],AL
+
+				; CALL	TSUGARU_DEBUG_BREAK
+
+						MOV		AL,12
+						CALL	COLOR
+						CALL	DRAW_AOMORI
+
+						MOV		AL,15
+						CALL	COLOR
+						CALL	DEMOSPLASH_MESSAGE
+
+						TEXTLOCATION	1,1
+						MOV		SI,OFFSET MESSAGE_LINE0
+						CALL	PRINT_TALL
+
+						TEXTLOCATION	30H,01H
+						MOV		SI,OFFSET MESSAGE_MACHINE_ID
+						CALL	PRINT_TALL
+
+						IN		AL,0031H	; Machine ID High
+						CALL	ITOX8
+						XCHG	AH,AL
+						MOV		WORD PTR CS:[UNCHARTED_TERRITORY],AX
+
+						IN		AL,0030H	; Machine ID Low
+						CALL	ITOX8
+						XCHG	AH,AL
+						MOV		WORD PTR CS:[UNCHARTED_TERRITORY+2],AX
+
+						MOV		BYTE PTR CS:[UNCHARTED_TERRITORY+4],0
+						TEXTLOCATION	3CH,01H
+						MOV		SI,OFFSET UNCHARTED_TERRITORY
+						CALL	PRINT_TALL
+
+
+						TEXTLOCATION	01H,02H
+						MOV		SI,OFFSET MESSAGE_LINE1
+						CALL	PRINT_TALL
+
+						TEXTLOCATION	01H,03H
+						MOV		SI,OFFSET MESSAGE_LINE2
+						CALL	PRINT_TALL
+
+
+						; CMOS_BACKED_UP flag is outside of the Loader.
+						; Needs to be copied separately.
+						PUSH	FS
+						CALL	GET_LOADER_TOP_EDX
+						MOV		AL,4	; Bit2=FS
+						CALL	GET_UNREALMODE_SEG
+						MOV		AL,FS:[CMOS_BACKED_UP]
+						MOV		CS:[CMOS_BACKED_UP],AL
+						POP		FS
+
+
+						TEST	WORD PTR [CONTROL_FLAGS],CONTROL_FLAG_BOOT_MENU
+						JNE		MAINMENU
+
+						CALL	BOOT_FROM_SCSI_CD
+
+						JMP		MAINMENU
+
+
+MAIN					ENDP
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+
+GET_LOADER_TOP_EDX:
+						MOV		EDX,ICM_LOADER_TOP
+						CALL	CMP_CPU_386SX
+						JNE		@f
+						MOV		EDX,ICM_LOADER_TOP_386SX
+@@:						RET
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+
+DEMOSPLASH_MESSAGE		PROC
+						MOV		AX,280AH
+						MOV		SI,OFFSET MSG_DEMOSPLASH
+						CALL	DRAW_TEXT
+						RET
+DEMOSPLASH_MESSAGE		ENDP
+
+DEMOSPLASH_MESSAGE_MOVABLE		PROC
+						MOV		SI,OFFSET MSG_DEMOSPLASH
+						CALL	DRAW_TEXT
+						RET
+DEMOSPLASH_MESSAGE_MOVABLE		ENDP
+
+
+MSG_DEMOSPLASH			DB		"PLEASE JOIN US AT DEMOSPLASH 2026",0
+						DB		"AND 2027, 2028, ...",0
+						DB		"https://demosplash.org",0
+						DB		0FFH,0FFH
+
+
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+
+
+
+HIROSAKI_MESSAGE_MOVABLE		PROC
+						MOV		SI,OFFSET MSG_HIROSAKI
+						CALL	DRAW_TEXT
+						RET
+HIROSAKI_MESSAGE_MOVABLE		ENDP
+
+MSG_HIROSAKI			DB		"VISIT HIROSAKI CITY IN",0
+						DB		"AOMORI PREFECTURE, JAPAN!",0
+						DB		"SICK AND TIRED OF OVERTOURISM?",0
+						DB		"TOO MANY TOURISTS IN TOKYO AND",0
+						DB		"KYOTO?",0
+						DB		"TRY HIROSAKI, AKA 'TSUGARU'",0
+						DB		"REGION!",0
+						DB		0FFH,0FFH
+
+
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+
+
+
+						INCLUDE		UTIL.ASM
+						INCLUDE		DRAWFONT.ASM
+						INCLUDE		MEMBANK.ASM
+						INCLUDE		../SCSILIB/SCSIIO.ASM
+						INCLUDE		../RS232C/RS232C.ASM
+						INCLUDE		../RS232C/XMODEM.ASM
+						INCLUDE		CRTC.ASM
+						INCLUDE		../MISCLIB/SERIAL.ASM
+						INCLUDE		../MISCLIB/UNREAL.ASM
+						INCLUDE		SCSIUTIL.ASM
+						INCLUDE		CDBOOT.ASM
+						INCLUDE		GRAPHICS.ASM
+						INCLUDE		TSUGARU.ASM
+						INCLUDE		UI.ASM
+						INCLUDE		HID_IO.ASM
+
+MESSAGE_LINE0			DB	"FMTOWNS RESCUE + CD MENU BY CAPTAINYS AND TUGS",0
+MESSAGE_LINE1			DB	VERSION_STRING,0
+MESSAGE_LINE2			DB	"http://www.ysflight.com",0
+MESSAGE_MACHINE_ID		DB	"MACHINE ID:",0
+
+
+IFDEF	COMEXE
+MESSAGE_VM86			DB	"This program does not run in the VM86 mode.$",0
+ENDIF
+
+						INCLUDE		MAINMENU.ASM
+						INCLUDE		CDSWMENU.ASM
+						INCLUDE		RS232MNU.ASM
+						INCLUDE		CMOSMENU.ASM
+						INCLUDE		DRVMENU.ASM
+						INCLUDE		CMOSRST.ASM
+						INCLUDE		IPLDMENU.ASM
+						INCLUDE		BOOTMENU.ASM
+						INCLUDE		INTRCEPT.ASM
+						INCLUDE		386SX.ASM
+						INCLUDE		PATCH.ASM
+						INCLUDE		../RESOURCE/AOMORI.ASM
+
+YSSCSICD_BINARY:
+						INCLUDE		YSSCBIN.ASM
+YSSCSICD_BINARY_END:
+						INCLUDE		BUFFERS.ASM
+
+
+						; After the end of the program.
+						; Can be used as a large buffer
+UNCHARTED_TERRITORY		DB		0
+
+
+
+CODE					ENDS
+
+						END		MAIN

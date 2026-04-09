@@ -1,0 +1,263 @@
+MENUITEM_LENGTH			EQU		80
+
+MAINMENU_ITEMNUM_BOOTMENU		EQU		1
+MAINMENU_ITEMNUM_DRVMENU		EQU		0
+MAINMENU_ITEMNUM_RESETCMOS		EQU		2
+MAINMENU_ITEMNUM_RS232CMENU		EQU		3
+MAINMENU_ITEMNUM_RESCAN_SCSI	EQU		4
+MAINMENU_ITEMNUM_IPLDEBUGMENU	EQU		5
+
+MAINMENU				PROC
+
+						; Tugs: removed CALL BOOTMENU so we land on MAINMENU directly
+
+MAINMENU_OUTER_LOOP:
+						CALL	MENU_WAIT_PAD_RELEASE
+
+						CALL	CLEAR_FIVE_BELOW
+
+						MOV		SI,OFFSET MAINMENU_ITEM_BUFFER
+						MOV		CX,NUM_MAINMENU_OPTIONS
+						CALL	DRAWMENU2
+
+						MOV		AX,DISPLACED_DEMOSPLASh_MESSAGE_LOCATION
+						CALL	DEMOSPLASH_MESSAGE_MOVABLE
+
+						MOV		AX,DISPLACED_DEMOSPLASh_MESSAGE_LOCATION
+						ADD		AL,5
+						CALL	HIROSAKI_MESSAGE_MOVABLE
+
+						MOV		CL,NUM_MAINMENU_OPTIONS
+						MOV		AL,CS:[MAINMENU_SELECTION]
+						CALL	DRAWARROW
+
+@@:
+						CALL	READ_PADA
+						CMP		AL,0FFH
+						JE		@b
+
+						MOV		AH,CS:[MAINMENU_SELECTION]
+						MOV		CH,NUM_MAINMENU_OPTIONS
+						CALL	MOVE_ARROW_BY_PAD
+						MOV		CS:[MAINMENU_SELECTION],AH
+
+						AND		AL,30H
+						CMP		AL,30H
+						JE		MAINMENU_OUTER_LOOP
+
+						;	AH is still Selection
+						;	Always one of the menu items.
+						MOVZX	SI,AH
+						SHL		SI,1
+						CALL	CS:[MAINMENU_JUMPTABLE+SI]
+						JMP		MAINMENU_OUTER_LOOP
+
+MAINMENU				ENDP
+
+
+
+NUM_MAINMENU_OPTIONS	EQU		6
+
+MAINMENU_SELECTION		DB		0
+	                           ; 01234567890123456789012345678901234567890123456789012345678901234567890123456789
+MAINMENU_ITEM_BUFFER	DB		"CMOS MENU",0
+						DB		"BOOT MENU",0
+						DB		"SERIAL (RS232C) MENU",0
+						DB		"RE-SCAN SCSI DEVICES",0
+						DB		"IPL DEBUG (DUMP B0000 to B00FF)",0
+						DB		"CD MENU - SWITCH CD",0
+
+MAINMENU_JUMPTABLE		DW		OFFSET CMOSMENU
+						DW		OFFSET BOOTMENU
+						DW		OFFSET RS232CMENU
+						DW		OFFSET RESCANSCSI
+						DW		OFFSET IPLDEBUG
+						DW		OFFSET CDSWMENU
+
+
+
+; Input
+;   AL Pad
+;   AH Current Selection
+;   CH Number of Choices
+; Output
+;   AH New Selection
+MOVE_ARROW_BY_PAD		PROC
+						TEST	AL,2
+						JE		MOVE_ARROW_BY_PAD_DOWN
+						TEST	AL,1
+						JE		MOVE_ARROW_BY_PAD_UP
+						RET
+
+MOVE_ARROW_BY_PAD_DOWN:
+						INC		AH
+						CMP		AH,CH
+						JL		SHORT @f
+						XOR		AH,AH
+						RET
+
+MOVE_ARROW_BY_PAD_UP:
+						SUB		AH,1
+						JAE		SHORT @f
+						MOV		AH,CH
+						DEC		AH
+@@:
+						RET
+
+MOVE_ARROW_BY_PAD		ENDP
+
+
+
+
+; INPUT
+;   AL PAD
+; OUTPUT
+;   BX  -1 LEFT
+;        0 NEUTRAL
+;        1 RIGHT
+;   ZF=0 IF LEFT OR RIGHT,  ZF=1 IF NEUTRAL
+PAD_TO_LEFT_RIGHT		PROC
+						XOR		BX,BX
+
+						TEST	AL,08H
+						JNE		SHORT @f
+						MOV		BX,1
+						AND		BX,BX
+						RET
+@@:
+						TEST	AL,04H
+						JNE		SHORT @f
+						MOV		BX,-1
+						AND		BX,BX
+						RET
+@@:
+						TEST	AL,10H
+						JNE		SHORT @f
+						MOV		BX,1
+						AND		BX,BX
+						RET
+@@:
+						TEST	AL,20H
+						JNE		SHORT @f
+						MOV		BX,-1
+
+@@:
+						AND		BX,BX
+						RET
+PAD_TO_LEFT_RIGHT		ENDP
+
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+
+
+MENU_WAIT_PAD_PRESS		PROC
+						TEXTLOCATION	INSTRUCTION_X,INSTRUCTION_Y
+						MOV		SI,OFFSET MENU_ASKPRESS_MESSAGE
+						CALL	PRINT_TALL
+
+						CALL	WAIT_BUTTON_PRESS
+
+						TEXTLOCATION	INSTRUCTION_X,INSTRUCTION_Y
+						CALL	ERASE_LINE_TALL
+
+						RET
+MENU_WAIT_PAD_PRESS		ENDP
+
+MENU_ASKPRESS_MESSAGE	DB		"PRESS PAD0 BUTTON",0
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+
+
+; INPUT/OUTPUT
+;	AL
+TOGGLE_1_0				PROC
+						AND		AL,1
+						XOR		AL,1
+						RET
+
+TOGGLE_1_0				ENDP
+
+
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+
+
+
+; Input
+;   DS:SI    Triple confirmation message
+; Output
+;   AH       0  Confirmed
+;            1  Cancelled
+MENU_TRIPLE_CONFIRM		PROC
+
+
+						MOV		BX,3
+						MOV		AH,1	; CANCEL
+TRIPLE_CONFIRM_LOOP:
+						PUSH	BX
+						PUSH	SI
+						PUSH	AX
+
+						CALL	MENU_WAIT_PAD_RELEASE
+						CALL	CLEAR_FIVE_BELOW
+
+						POP		AX
+						POP		SI
+						PUSH	SI
+						PUSH	AX
+
+						MOV		CX,2		; 2 MENU ITEMS
+						CALL	DRAWMENU2
+
+						POP		AX
+						PUSH	AX
+
+						MOV		CX,2		; 2 MENU ITEMS
+						MOV		AL,AH		; AL=CURRENT SELECTION
+						CALL	DRAWARROW
+
+						POP		AX
+						POP		SI
+
+@@:
+						XCHG	DH,AH		; Save AH
+						CALL	READ_PADA
+						XCHG	DH,AH		; Restore AH
+						CMP		AL,0FFH
+						JE		@b
+
+						MOV		CH,2
+						CALL	MOVE_ARROW_BY_PAD
+
+						POP		BX
+
+						AND		AL,30H
+						CMP		AL,30H
+						JE		TRIPLE_CONFIRM_LOOP
+
+						CMP		AH,1
+						JNE		SHORT @f
+						RET
+
+@@:
+						CALL	SKIP_CSTR_DS_SI
+						CALL	SKIP_CSTR_DS_SI
+						DEC		BX
+						JE		SHORT @f
+						MOV		AH,1	; CANCEL
+						JMP		TRIPLE_CONFIRM_LOOP
+
+@@:
+						RET
+
+MENU_TRIPLE_CONFIRM		ENDP
+
+
+
+RESCANSCSI				PROC
+						CALL	CLEAR_FIVE_BELOW
+						CALL	LISTSCSI
+						CALL	FIND_LAST_SCSI_CD
+						MOV		CS:[SCSI_ID_CDROM],AL
+						RET
+RESCANSCSI				ENDP
