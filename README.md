@@ -173,3 +173,11 @@ prefix before displaying, so it does not pollute the visible name).
      straight away without going through BOOT MENU.
 5. From the main menu, the BOOT MENU still works exactly as before and can
    be used as an alternative boot path.
+
+## CaptainYS Code as submodule
+
+Code from CaptainYS is linked as a submodule to this project (stored into deps directory)
+
+To refresh the code from CaptainYS repo, after cloning CD MENU repository and before building, launche the following command
+
+git submodule update --remote deps/captainys-FM
