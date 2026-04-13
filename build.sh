@@ -111,8 +111,8 @@ sed -i.bak 's/DB		"IPL DEBUG (DUMP B0000 to B00FF)",0/DB		"IPL DEBUG (DUMP B0000
 sed -i.bak 's/DW		OFFSET IPLDEBUG$/DW		OFFSET IPLDEBUG\
 						DW		OFFSET CDSWMENU/' MAINMENU.ASM
 
-# Remove auto-BOOTMENU on startup
-sed -i.bak 's/CALL	BOOTMENU	; Go to BOOT MENU first/; CD Menu: land on MAINMENU directly/' MAINMENU.ASM
+# Replace CALL BOOTMENU with CALL CDSWMENU → boot directly into CD Menu
+sed -i.bak 's/CALL	BOOTMENU	; Go to BOOT MENU first/CALL	CDSWMENU	; Boot directly into CD Menu/' MAINMENU.ASM
 echo "  Patched MAINMENU.ASM"
 
 # ── Step 3: JWASM compatibility fixes ────────────────────────────────────────

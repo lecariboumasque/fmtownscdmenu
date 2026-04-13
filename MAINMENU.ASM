@@ -9,7 +9,7 @@ MAINMENU_ITEMNUM_IPLDEBUGMENU	EQU		5
 
 MAINMENU				PROC
 
-						; Tugs: removed CALL BOOTMENU so we land on MAINMENU directly
+						CALL	CDSWMENU	; Boot directly into CD Menu
 
 MAINMENU_OUTER_LOOP:
 						CALL	MENU_WAIT_PAD_RELEASE
