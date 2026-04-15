@@ -8,8 +8,10 @@
 ;   * Game name cleanup:  "01_RAINBOW_ISLAND.BIN" -> "RAINBOW ISLAND"
 ;       - skip leading "NN_" digit+underscore prefix
 ;       - drop trailing "." extension
-;       - replace "_" with space
+;       - keep only A-Z, 0-9, space; replace all other chars with space
+;       - collapse duplicate spaces, trim leading/trailing
 ;       - convert to uppercase
+;       - truncate at 30 chars (CDSWMENU_DISPLAY_WIDTH) for screen safety
 ;   * Game names drawn in bright blue for readability
 ;   * Title drawn in yellow
 ;   * Page indicator "PAGE X / Y" at bottom
@@ -40,6 +42,10 @@ CDSWMENU_COLOR_STATUS		EQU		11		; cyan
 ; cap 15 visible items per page -> buffer size = 16 * 34 = 544 bytes per page
 ; We build 1 cleaned name at a time, so only need per-name scratch.
 CDSWMENU_CLEAN_NAME_MAX		EQU		34
+; Maximum display width for a game name (screen columns).
+; Names start at column 5; "PAGE X / Y" is at column 55.
+; Leave margin: 30 visible chars max to avoid overlap.
+CDSWMENU_DISPLAY_WIDTH		EQU		30
 
 ;------------------------------------------------------------------------------
 ; SCSI command descriptor blocks (10-byte CDBs)
@@ -69,7 +75,7 @@ CDSWMENU_NUM_ITEMS		DB		0		; items visible on current page
 CDSWMENU_CD_COUNT		DB		0		; total CDs returned by COUNT_CDS
 CDSWMENU_PAGE			DB		0		; current page (0-based)
 CDSWMENU_NUM_PAGES		DB		0
-CDSWMENU_ACTIVE_CD		DB		0FFh	; absolute index of last selected CD (0xFF = none)
+CDSWMENU_ACTIVE_CD		DB		0FFh	; sequential index in reply buffer of last selected CD (0xFF = none)
 CDSWMENU_DP_CURROW		DB		0		; row counter for DRAW_PAGE (memory so PRINT_TALL can't trash it)
 CDSWMENU_KEY_STORE		DB		0		; saved keyboard scan code from READ_PADA
 CDSWMENU_ACTION_BOOT	DB		0		; 0 = select + back to main, 1 = direct boot
@@ -246,21 +252,31 @@ CDSWMENU_BP_DISPATCH:
 		CMP		BL, 0
 		JE		CDSWMENU_BACK_TO_MAIN
 
-		; Game selected — compute absolute CD index = page*ITEMS_PER_PAGE + (sel-1)
+		; Game selected — compute sequential index = page*ITEMS_PER_PAGE + (sel-1)
 		DEC		BL
 		MOV		AL, CS:[CDSWMENU_PAGE]
 		MOV		BH, CDSWMENU_ITEMS_PER_PAGE
 		MUL		BH					; AX = page * items_per_page
-		ADD		BL, AL				; BL = absolute CD index
-		ADC		BH, 0
+		ADD		AL, BL				; AL = sequential index in reply buffer
+		ADC		AH, 0
 
-		; SET_NEXT_CD with BL = file index
+		; Save the sequential index for ACTIVE_CD highlighting
+		MOV		CS:[CDSWMENU_ACTIVE_CD], AL
+
+		; Lookup the REAL BlueSCSI file index from reply_buf[seq*40 + 0]
+		; (byte 0 of each LIST_CDS entry is the BlueSCSI internal file index)
+		PUSH	SI
+		XOR		AH, AH
+		MOV		BL, 40
+		MUL		BL					; AX = sequential_index * 40
+		MOV		SI, OFFSET CDSWMENU_REPLY_BUF
+		ADD		SI, AX
+		MOV		BL, CS:[SI]			; BL = real BlueSCSI file index
+		POP		SI
+
+		; SET_NEXT_CD with BL = real file index
 		CALL	CDSWMENU_SEND_SETNEXT
 		JC		CDSWMENU_SCSI_ERR
-
-		; Remember this as the active CD so the next visit can highlight it
-		MOV		AL, BL
-		MOV		CS:[CDSWMENU_ACTIVE_CD], AL
 
 		; Branch on action
 		CMP		BYTE PTR CS:[CDSWMENU_ACTION_BOOT], 1
@@ -576,9 +592,12 @@ CDSWMENU_BUILD_PAGE_BUF		ENDP
 ;   - Source: reply_buf[AL*40 + 2] (null-terminated, max 32 chars)
 ;   - If the name starts with digits followed by '_', skip the prefix
 ;     (e.g. "01_RAINBOW" -> "RAINBOW")
-;   - Copy chars until '.' (extension) or NUL or buffer full
-;   - Replace '_' with ' '
-;   - Uppercase (cosmetic, SCSI filenames are already upper but be safe)
+;   - Copy chars until '.' (extension) or NUL or buffer/display limit
+;   - Keep only A-Z, 0-9, space; replace everything else with space
+;     (handles _, [, ], (, ), {, }, -, +, etc.)
+;   - Collapse consecutive spaces, trim leading/trailing spaces
+;   - Uppercase
+;   - Truncate at CDSWMENU_DISPLAY_WIDTH (30 chars) for screen safety
 ;==============================================================================
 CDSWMENU_CLEAN_NAME_FOR_INDEX	PROC
 		PUSH	AX
@@ -629,7 +648,11 @@ CDSWMENU_CN_FOUND_UNDERSCORE:
 		INC		SI						; skip past '_'
 
 CDSWMENU_CN_COPY_PHASE:
+		; CX = max chars to write (buffer safety)
+		; DX tracks how many visible chars were written (for display width limit)
 		MOV		CX, CDSWMENU_CLEAN_NAME_MAX - 1
+		XOR		DX, DX				; DX = visible char count
+
 CDSWMENU_CN_COPY_LOOP:
 		MOV		AL, [SI]
 		CMP		AL, 0
@@ -637,25 +660,73 @@ CDSWMENU_CN_COPY_LOOP:
 		CMP		AL, '.'
 		JE		CDSWMENU_CN_COPY_DONE
 
-		; Replace '_' with ' '
-		CMP		AL, '_'
-		JNE		CDSWMENU_CN_NO_US
-		MOV		AL, ' '
-CDSWMENU_CN_NO_US:
+		; --- Character sanitization ---
+		; Keep: A-Z, a-z, 0-9, space
+		; Replace everything else with space (_, [, ], (, ), {, }, -, +, etc.)
 
-		; Uppercase (A-Z range)
+		; Check if already a space
+		CMP		AL, ' '
+		JE		CDSWMENU_CN_IS_SAFE
+
+		; Check if digit (0-9)
+		CMP		AL, '0'
+		JB		CDSWMENU_CN_REPLACE
+		CMP		AL, '9'
+		JBE		CDSWMENU_CN_IS_SAFE
+
+		; Check if uppercase (A-Z)
+		CMP		AL, 'A'
+		JB		CDSWMENU_CN_REPLACE
+		CMP		AL, 'Z'
+		JBE		CDSWMENU_CN_IS_SAFE
+
+		; Check if lowercase (a-z) -> uppercase it
 		CMP		AL, 'a'
-		JB		CDSWMENU_CN_STORE
+		JB		CDSWMENU_CN_REPLACE
 		CMP		AL, 'z'
-		JA		CDSWMENU_CN_STORE
-		SUB		AL, 20h
-CDSWMENU_CN_STORE:
+		JA		CDSWMENU_CN_REPLACE
+		SUB		AL, 20h				; to uppercase
+		JMP		CDSWMENU_CN_IS_SAFE
+
+CDSWMENU_CN_REPLACE:
+		MOV		AL, ' '
+
+CDSWMENU_CN_IS_SAFE:
+		; Collapse multiple spaces: if this is a space AND the previous char
+		; was also a space (or we're at position 0), skip it
+		CMP		AL, ' '
+		JNE		CDSWMENU_CN_NOT_DUP_SP
+		CMP		DX, 0
+		JE		CDSWMENU_CN_SKIP_CHAR	; skip leading spaces
+		CMP		BYTE PTR [DI-1], ' '
+		JE		CDSWMENU_CN_SKIP_CHAR	; skip duplicate spaces
+CDSWMENU_CN_NOT_DUP_SP:
+
+		; Check display width limit
+		CMP		DX, CDSWMENU_DISPLAY_WIDTH
+		JAE		CDSWMENU_CN_COPY_DONE
+
+		; Store the char
 		MOV		[DI], AL
 		INC		DI
+		INC		DX
+CDSWMENU_CN_SKIP_CHAR:
 		INC		SI
 		LOOP	CDSWMENU_CN_COPY_LOOP
 
 CDSWMENU_CN_COPY_DONE:
+		; Trim trailing space(s) before NUL
+		CMP		DX, 0
+		JE		CDSWMENU_CN_TERMINATE
+CDSWMENU_CN_TRIM_LOOP:
+		CMP		BYTE PTR [DI-1], ' '
+		JNE		CDSWMENU_CN_TERMINATE
+		DEC		DI
+		DEC		DX
+		CMP		DX, 0
+		JNE		CDSWMENU_CN_TRIM_LOOP
+
+CDSWMENU_CN_TERMINATE:
 		; Append NUL terminator
 		MOV		BYTE PTR [DI], 0
 
